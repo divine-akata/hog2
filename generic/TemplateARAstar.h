@@ -1,15 +1,15 @@
 /**
- * @file TemplateAStar.h
+ * @file TemplateARAstar.h
  * @package hog2
- * @brief A templated version of A*. This code assumes all states have unique hashes to reduce storage.
- * @author Nathan Sturtevant
+ * @brief A templated version of ARA* based on the templated version of A*. This code assumes all states have unique hashes to reduce storage.
+ * @author Nathan Sturtevant, modified by Divine Akata
  * SearchEnvironment
- * @date 3/22/06, modified 06/13/2007
+ * @date 3/22/06, modified 06/13/2007, work in progress
  *
  */
 
-#ifndef TemplateAStar_H
-#define TemplateAStar_H
+#ifndef TemplateARAstar_H
+#define TemplateARAstar_H
 
 #define __STDC_CONSTANT_MACROS
 #include <stdint.h>
@@ -74,7 +74,7 @@ template <class state, class action, class environment, class openList = AStarOp
 class TemplateAStar : public GenericSearchAlgorithm<state,action,environment> {
 public:
 	TemplateAStar() {
-		ResetNodeCount(); env = 0; useBPMX = 0; stopAfterGoal = true; weight=1; reopenNodes = false; theHeuristic = 0; directed = false;
+		ResetNodeCount(); env = 0; stopAfterGoal = true; weight=1; reopenNodes = false; theHeuristic = 0;
 		theConstraint = 0;
 		heuristicSet = false;
 		phi = [](double h, double g){ return g+h; };
@@ -89,6 +89,8 @@ public:
 	
 	bool InitializeSearch(environment *env, const state& from, const state& to, std::vector<state> &thePath);
 	bool DoSingleSearchStep(std::vector<state> &thePath);
+	bool ImprovePath(std::vector<state> &thePath);
+	void ARAStar(environment *env, const state& from, const state& to, std::vector<state> &thePath);
 	void AddAdditionalStartState(const state& newState);
 	void AddAdditionalStartState(const state& newState, double cost);
 	
@@ -122,14 +124,10 @@ public:
 	dataLocation GetStateLocation(const state &val)
 	{ uint64_t key; return openClosedList.Lookup(env->GetStateHash(val), key); }
 	
-	void SetUseBPMX(int depth) { useBPMX = depth; if (depth) reopenNodes = true; }
-	int GetUsingBPMX() { return useBPMX; }
 
 	void SetReopenNodes(bool re) { reopenNodes = re; }
 	bool GetReopenNodes() { return reopenNodes; }
 
-	// Only necessary for BPMX computation
-	void SetDirected(bool d) { directed = d; }
 	
 	void SetHeuristic(Heuristic<state> *h) { theHeuristic = h; if (h) heuristicSet = true; else heuristicSet = false; }
 	void SetConstraint(Constraint<state> *c) { theConstraint = c; }
@@ -142,7 +140,6 @@ public:
 	void SetStopAfterGoal(bool val) { stopAfterGoal = val; }
 	bool GetStopAfterGoal() { return stopAfterGoal; }
 	
-	void FullBPMX(uint64_t nodeID, int distance);
 	
 	void Draw(Graphics::Display &disp) const;
 	void DrawSuboptimality(Graphics::Display &disp) const;
@@ -177,19 +174,22 @@ private:
 	double goalFCost;
 	double weight;
 	std::function<double(double, double)> phi;
-	bool directed;
-	int useBPMX;
 	bool reopenNodes;
 	uint64_t uniqueNodesExpanded;
 	environment *radEnv;
 	Heuristic<state> *theHeuristic;
 	bool heuristicSet; // used to know if it should be cleared / reset
 	Constraint<state> *theConstraint;
+	/*
+	ARA*
+	 */
+	std::unordered_map<uint64_t, AStarOpenClosedDataWithF<state>> incons;
+	double epsilon;
 };
 
 /**
  * Return the name of the algorithm. 
- * @author Nathan Sturtevant
+ * @author Nathan Sturtevant, modified by Divine Akata
  * @date 03/22/06
  *
  * @return The name of the algorithm
@@ -199,7 +199,7 @@ template <class state, class action, class environment, class openList>
 const char *TemplateAStar<state,action,environment,openList>::GetName()
 {
 	static char name[32];
-	sprintf(name, "TemplateAStar[]");
+	sprintf(name, "TemplateARAstar[]");
 	return name;
 }
 
@@ -260,7 +260,7 @@ void TemplateAStar<state,action,environment,openList>::Reset()
 
 /**
  * Initialize the A* search
- * @author Nathan Sturtevant	
+ * @author Nathan Sturtevant, modified by Divine Akata
  * @date 03/22/06
  * 
  * @param _env The search environment
@@ -276,6 +276,11 @@ bool TemplateAStar<state,action,environment,openList>::InitializeSearch(environm
 	thePath.resize(0);
 	env = _env;
 	openClosedList.Reset(env->GetMaxHash());
+
+	// ARA*
+	incons.clear();
+	epsilon = weight;
+
 	ResetNodeCount();
 	start = from;
 	goal = to;
@@ -343,12 +348,26 @@ bool TemplateAStar<state,action,environment,openList>::DoSingleSearchStep(std::v
 		uniqueNodesExpanded++;
 	nodesExpanded++;
 
-	if ((stopAfterGoal) && (env->GoalTest(openClosedList.Lookup(nodeid).data, goal)))
+	// ARA* 
+	if (env->GoalTest(openClosedList.Lookup(nodeid).data, goal))
 	{
+		goalFCost = openClosedList.Lookup(nodeid).f;
 		ExtractPathToStartFromID(nodeid, thePath);
-		// Path is backwards - reverse
-		reverse(thePath.begin(), thePath.end()); 
-		goalFCost = openClosedList.Lookup(nodeid).f;// + openClosedList.Lookup(nodeid).h;
+		reverse(thePath.begin(), thePath.end());
+	}
+
+	// if ((stopAfterGoal) && (env->GoalTest(openClosedList.Lookup(nodeid).data, goal)))
+	// {
+	// 	ExtractPathToStartFromID(nodeid, thePath);
+	// 	// Path is backwards - reverse
+	// 	reverse(thePath.begin(), thePath.end()); 
+	// 	goalFCost = openClosedList.Lookup(nodeid).f;// + openClosedList.Lookup(nodeid).h;
+	// 	return true;
+	// }
+
+	double minF = openClosedList.Lookat(openClosedList.Peek()).f;
+	if (goalFCost <= minF)
+	{
 		return true;
 	}
 	
@@ -361,38 +380,14 @@ bool TemplateAStar<state,action,environment,openList>::DoSingleSearchStep(std::v
 	//std::cout << openClosedList.Lookup(nodeid).g+openClosedList.Lookup(nodeid).h << std::endl;
 	
  	env->GetSuccessors(openClosedList.Lookup(nodeid).data, neighbors);
-	double bestH = openClosedList.Lookup(nodeid).h;
-	double lowHC = DBL_MAX;
-	// 1. load all the children
+
+	// // 1. load all the children
 	for (unsigned int x = 0; x < neighbors.size(); x++)
 	{
 		uint64_t theID;
 		neighborLoc.push_back(openClosedList.Lookup(env->GetStateHash(neighbors[x]), theID));
 		neighborID.push_back(theID);
 		edgeCosts.push_back(env->GCost(openClosedList.Lookup(nodeid).data, neighbors[x]));
-		if (useBPMX)
-		{
-			if (neighborLoc.back() != kNotFound)
-			{
-				if (!directed)
-					bestH = std::max(bestH, openClosedList.Lookup(theID).h-edgeCosts.back());
-				lowHC = std::min(lowHC, openClosedList.Lookup(theID).h+edgeCosts.back());
-			}
-			else {
-				double tmpH = theHeuristic->HCost(neighbors[x], goal);
-				if (!directed)
-					bestH = std::max(bestH, tmpH-edgeCosts.back());
-				lowHC = std::min(lowHC, tmpH+edgeCosts.back());
-			}
-		}
-	}
-	
-	if (useBPMX) // propagate best child to parent
-	{
-		if (!directed)
-			openClosedList.Lookup(nodeid).h = std::max(openClosedList.Lookup(nodeid).h, bestH);
-		openClosedList.Lookup(nodeid).h = std::max(openClosedList.Lookup(nodeid).h, lowHC);
-		openClosedList.Lookup(nodeid).f = phi(openClosedList.Lookup(nodeid).h, openClosedList.Lookup(nodeid).g);
 	}
 	
 	// iterate again updating costs and writing out to memory
@@ -408,99 +403,108 @@ bool TemplateAStar<state,action,environment,openList>::DoSingleSearchStep(std::v
 		switch (neighborLoc[x])
 		{
 			case kClosedList:
-				if (useBPMX) // propagate parent to child - do this before potentially re-opening
-				{
-					if (fless(openClosedList.Lookup(neighborID[x]).h, bestH-edgeCosts[x]))
-					{
-						auto &i = openClosedList.Lookup(neighborID[x]);
-						i.h = bestH-edgeCosts[x];
-						i.f = phi(i.h, i.g);
-						if (useBPMX > 1) FullBPMX(neighborID[x], useBPMX-1);
-					}
-				}
-				if (reopenNodes)
-				{
-					if (fless(openClosedList.Lookup(nodeid).g+edgeCosts[x], openClosedList.Lookup(neighborID[x]).g))
-					{
-						auto &i = openClosedList.Lookup(neighborID[x]);
-						i.parentID = nodeid;
-						i.g = openClosedList.Lookup(nodeid).g+edgeCosts[x];
-						i.f = phi(i.h, i.g);
-						openClosedList.Reopen(neighborID[x]);
-						// This line isn't normally needed, but in some state spaces we might have
-						// equality but different meta information, so we need to make sure that the
-						// meta information is also copied, since this is the most generic A* implementation
-						i.data = neighbors[x];
-					}
-				}
-				break;
-			case kOpenList:
-				//edgeCost = env->GCost(openClosedList.Lookup(nodeid).data, neighbors[x]);
 				if (fless(openClosedList.Lookup(nodeid).g+edgeCosts[x], openClosedList.Lookup(neighborID[x]).g))
 				{
 					auto &i = openClosedList.Lookup(neighborID[x]);
 					i.parentID = nodeid;
 					i.g = openClosedList.Lookup(nodeid).g+edgeCosts[x];
 					i.f = phi(i.h, i.g);
-					// This line isn't normally needed, but in some state spaces we might have
-					// equality but different meta information, so we need to make sure that the
-					// meta information is also copied, since this is the most generic A* implementation
+					i.data = neighbors[x];
+					incons[env->GetStateHash(neighbors[x])] = i;
+				}
+				break;
+			case kOpenList:
+				if (fless(openClosedList.Lookup(nodeid).g+edgeCosts[x], openClosedList.Lookup(neighborID[x]).g))
+				{
+					auto &i = openClosedList.Lookup(neighborID[x]);
+					i.parentID = nodeid;
+					i.g = openClosedList.Lookup(nodeid).g+edgeCosts[x];
+					i.f = phi(i.h, i.g);
 					i.data = neighbors[x];
 					openClosedList.KeyChanged(neighborID[x]);
-//					std::cout << " Reducing cost to " << openClosedList.Lookup(nodeid).g+edgeCosts[x] << "\n";
-					// TODO: unify the KeyChanged calls.
-				}
-				else {
-//					std::cout << " no cheaper \n";
-				}
-				if (useBPMX) // propagate best child to parent
-				{
-					if (fgreater(bestH-edgeCosts[x], openClosedList.Lookup(neighborID[x]).h))
-					{
-						auto &i = openClosedList.Lookup(neighborID[x]);
-						i.h = std::max(i.h, bestH-edgeCosts[x]);
-						i.f = phi(i.h, i.g);
-						openClosedList.KeyChanged(neighborID[x]);
-					}
 				}
 				break;
 			case kNotFound:
-				{ // add node to open list
-					//double edgeCost = env->GCost(openClosedList.Lookup(nodeid).data, neighbors[x]);
-//					std::cout << " adding to open ";
-//					std::cout << double(theHeuristic->HCost(neighbors[x], goal)+openClosedList.Lookup(nodeid).g+edgeCosts[x]);
-//					std::cout << " \n";
+				{
 					double h = theHeuristic->HCost(neighbors[x], goal);
-					if (useBPMX)
-					{
-						h = std::max(h, openClosedList.Lookup(nodeid).h-edgeCosts[x]);
-						openClosedList.AddOpenNode(neighbors[x],
-												   env->GetStateHash(neighbors[x]),
-												   phi(std::max(h, openClosedList.Lookup(nodeid).h-edgeCosts[x]), openClosedList.Lookup(nodeid).g+edgeCosts[x]),
-												   openClosedList.Lookup(nodeid).g+edgeCosts[x],
-												   h,
-												   nodeid);
-					}
-					else {
-						openClosedList.AddOpenNode(neighbors[x],
-												   env->GetStateHash(neighbors[x]),
-												   phi(h, openClosedList.Lookup(nodeid).g+edgeCosts[x]),
-												   openClosedList.Lookup(nodeid).g+edgeCosts[x],
-												   h,
-												   nodeid);
-					}
-//					if (loc == -1)
-//					{ // duplicate edges
-//						neighborLoc[x] = kOpenList;
-//						x--;
-//					}
+					openClosedList.AddOpenNode(neighbors[x],
+											   env->GetStateHash(neighbors[x]),
+											   phi(h, openClosedList.Lookup(nodeid).g+edgeCosts[x]),
+											   openClosedList.Lookup(nodeid).g+edgeCosts[x],
+											   h,
+											   nodeid);
 				}
+				break;
 		}
 	}
 		
 	return false;
 }
 
+/**
+ * ARA*: Improve the current path by continuing to expand nodes until the termination condition is met.
+ * @author Divine Akata
+ * @date 06/26/26
+ */
+template <class state, class action, class environment, class openList>
+bool TemplateAStar<state,action,environment,openList>::ImprovePath(std::vector<state> &thePath)
+{
+	while (!DoSingleSearchStep(thePath))
+	{
+	}
+	return true;
+}
+
+/**
+ * ARA*: runs ImprovePath repeatedly, decrementing epsilon and moving INCONS into OPEN between iterations, until epsilon reaches 1.0 (optimal).
+ * @author Divine Akata
+ * @date 06/26/26
+ */
+template <class state, class action, class environment, class openList>
+void TemplateAStar<state,action,environment,openList>::ARAStar(environment *_env, const state& from, const state& to, std::vector<state> &thePath)
+{
+	if (!InitializeSearch(_env, from, to, thePath))
+		return;
+	
+	ImprovePath(thePath);
+	
+	while (epsilon > 1.0)
+	{
+		epsilon = std::max(1.0, epsilon - 0.1); // decrement step .....?
+		SetWeight(epsilon);
+		
+		// move INCONS into OPEN
+		for (auto &entry : incons)
+		{
+			uint64_t hash = entry.first;
+			auto &i = entry.second;
+			
+			uint64_t objKey;
+			openClosedList.Lookup(hash, objKey); // find existing element index (still kClosedList)
+			
+			auto &elem = openClosedList.Lookup(objKey);
+			elem.parentID = i.parentID;
+			elem.g = i.g;
+			elem.h = i.h;
+			elem.f = phi(i.h, i.g);
+			elem.data = i.data;
+			
+			openClosedList.Reopen(objKey);
+		}
+		incons.clear();
+		
+		// re-sort OPEN with new weight and recompute f for everything in OPEN
+		for (unsigned int x = 0; x < openClosedList.OpenSize(); x++)
+		{
+			uint64_t id = openClosedList.GetOpenItem(x);
+			auto &i = openClosedList.Lookup(id);
+			i.f = phi(i.h, i.g);
+			openClosedList.KeyChanged(id);
+		}
+		
+		ImprovePath(thePath);
+	}
+}
 /**
  * Returns the next state on the open list (but doesn't pop it off the queue). 
  * @author Nathan Sturtevant
@@ -515,55 +519,6 @@ state TemplateAStar<state, action,environment,openList>::CheckNextNode()
 	return openClosedList.Lookup(key).data;
 	//assert(false);
 	//return openQueue.top().currNode;
-}
-
-/**
- * Perform a full bpmx propagation
- * @author Nathan Sturtevant
- * @date 6/9/9
- * 
- * @return The first state in the open list. 
- */
-template <class state, class action, class environment, class openList>
-void TemplateAStar<state, action,environment,openList>::FullBPMX(uint64_t nodeID, int distance)
-{
-	if (distance <= 0)
-		return;
-	
-	nodesExpanded++;
-	std::vector<state> succ;
- 	env->GetSuccessors(openClosedList.Lookup(nodeID).data, succ);
-	double parentH = openClosedList.Lookup(nodeID).h;
-	
-	// load all the children and push parent heuristic value to children
-	for (unsigned int x = 0; x < succ.size(); x++)
-	{
-		uint64_t theID;
-		dataLocation loc = openClosedList.Lookup(env->GetStateHash(succ[x]), theID);
-		double edgeCost = env->GCost(openClosedList.Lookup(nodeID).data, succ[x]);
-		double newHCost = parentH-edgeCost;
-		
-		switch (loc)
-		{
-			case kClosedList:
-			{
-				if (fgreater(newHCost, openClosedList.Lookup(theID).h))
-				{
-					openClosedList.Lookup(theID).h = newHCost;
-					FullBPMX(theID, distance-1);
-				}
-			}
-			case kOpenList:
-			{
-				if (fgreater(newHCost, openClosedList.Lookup(theID).h))
-				{
-					openClosedList.Lookup(theID).h = newHCost;
-					openClosedList.KeyChanged(theID);
-				}
-			}
-			case kNotFound: break;
-		}
-	}
 }
 
 
